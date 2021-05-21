@@ -54,6 +54,10 @@ Function VTX_ConstantCore, time, xInt, ts, vB, vTmax, delXTo, delXTo_B, END_VTVB
     end_vTvB = endVT/vB
   endif
 
+;  if Check_Math() GT 0 then begin
+;    print, "Math error in VTXL_ConstantCore"
+;  endif
+
   return, halfLen
 End
 
@@ -117,9 +121,78 @@ Function VTXL_ConstantCore, length, xInt, ts, vB, vTmax, delXTo, delXTo_B, END_V
     else endVT = vB
     end_vTvB = endVT/vB
   endif
+  
+;  if Check_Math() GT 0 then begin    ; Check for numerical errors
+;    print, "Math error in VTXL_ConstantCore"
+;  endif
 
   return, time + ts
 End
+
+; Returns an array of CDF indices given an array of random values
+Function FindCDFIndices, cdf, values
+  nCDF = N_Elements(cdf)
+  nVal = N_Elements(values)
+  cdfInd = LonArr(nVal)
+  for i=0,nVal-1 do begin
+    hi = nCDF-1
+    lo = 0
+    if (values[i] LE cdf[0]) then ind = 0 $
+    else begin
+      while (hi-lo GT 1) do begin
+        mid = (hi+lo)/2
+        if (cdf[mid] GT values[i]) then hi = mid else lo = mid
+      endwhile
+      ind = (values[i] EQ cdf[lo]) ? lo : hi
+; special case for if we're in the middle of a streak of identical values, and thus zero probability
+      while (cdf[ind] EQ cdf[ind-1]) do ind--
+    endelse
+    cdfInd[i] = ind
+  endfor
+  return, cdfInd
+End
+
+; Function GenerateLatentLengths
+; 
+; Creates a latent track length distribution with length biasing.  Tracks that are longer are
+; more likely to be intersected and thus sampled.  In the simplest case, relative probability
+; of intersection is proportional to length.  This probability can be modified by excluding 
+; the tip zone (tipEx), subtracting 2*tipEx, making the biasing based on the portion of the 
+; track that can be intersected without making it unmeasurable.
+;
+; INPUT:
+;   numLen: Number of lengths to generate
+;   meanLen: Mean of the underlying (non-biased) length distribution (µm)
+;   sdLen: Standard deviation of the underlying length distribution (µm)
+;
+; KEYWORD PARAMETERS:
+;   EX_TIP_ZONE: Length of tip region to exclude from intersection (µm, default 0)
+;
+; OUTPUT:
+;   FltArr of lengths that is a biased version of the input distribution
+;
+; MODIFICATION HISTORY
+;   WRITTEN BY: Richard Ketcham, May 2021
+
+Function GenerateLatentLengths, numLen, meanLen, sdLen, EX_TIP_ZONE=exTip
+
+  if (N_Params() LT 3) OR (sdLen EQ 0.) then return, Make_Array(numLen, /FLOAT, VALUE=meanLen)
+
+  prec = 0.01 ; Track length precision
+  xAxis = IndGen(20./prec)*prec  ; PDF of track lengths, from 0 to 20 um
+  tlPDF = ((1./(sdLen*sqrt(2.*!PI)))*exp(-0.5*((xAxis-meanLen)/sdLen)^2))
+;  tlPDF /= Total(tlPDF)
+  biasedPDF = Keyword_Set(exTip) ? tlPDF*(xAxis-2.*exTip > 0.) : tlPDF*xAxis
+  biasedPDF /= TOTAL(biasedPDF)
+
+;  tlCDF = Total(tlPDF,/CUMULATIVE)
+  biasedCDF = Total(biasedPDF,/CUMULATIVE)
+  picks = RandomU(seed,numLen)
+  lengths = FindCDFIndices(biasedCDF,picks)*prec
+  
+  return, lengths
+End
+
 
 
 ; Pro PlotTipSequence
@@ -155,9 +228,9 @@ End
 
 Pro PlotTipSequence, vB, vTmax, delXTo, delXTo_B, TIMES=times, X_STEP=xStep
   if (N_Params() LT 1) then vB = 0.022
-  if (N_Params() LT 2) then vTmax = 0.83
-  if (N_Params() LT 3) then delXTo = 10.5
-  if (N_Params() LT 4) then delXTo_B = 3.0
+  if (N_Params() LT 2) then vTmax = 1.639
+  if (N_Params() LT 3) then delXTo = 0.74
+  if (N_Params() LT 4) then delXTo_B = 8.136
   if NOT Keyword_Set(times) then times = (IndGen(5)+1)*5.
   if NOT Keyword_Set(xStep) then xStep = 0.1
   
@@ -197,13 +270,14 @@ Pro PlotTipSequence, vB, vTmax, delXTo, delXTo_B, TIMES=times, X_STEP=xStep
   endfor
   print, 'Tip vT/vB for each time: ',tipVTVBs[lensUsed]
   print, 'Alpha angles: ',tipAlphas
+  print, 'Full lengths: ', 2.*lengths[lensUsed]
   
 End
 
 
 ; Pro CalcRevelationRates
 ;
-; Calculates confined track revelation due to etching a polished grain srface as a function of depth and 
+; Calculates confined track revelation due to etching a polished grain surface as a function of depth and 
 ; time due to etching model and track type.
 ; 
 ; METHOD
@@ -249,6 +323,7 @@ End
 ; 
 ; MODIFICATION HISTORY
 ;   WRITTEN BY: Richard Ketcham, June 2020
+; March 2021 RAK: Corrected revelation rate to be proportional to increase in semi-track diameter
 
 
 Pro CalcRevelationRates, vB, vTmax, delXTo, delXTo_B, EXTERNAL=external, CF=cf, SHOW=show, REVCDF=revCDF, $
@@ -274,9 +349,9 @@ Pro CalcRevelationRates, vB, vTmax, delXTo, delXTo_B, EXTERNAL=external, CF=cf, 
     cfLen = 5.9   ; microns; based on measurements of DUR tracks at UTCT (75 degree dip)
     cfLenSD = 1.4 ; microns
     cfDip = 75./!RADEG
-    cfVTmax = 1.35 ; Default Cf etching model based on unannealed induced, constant-core model
-    cfDelXTo = 3.69
-    cfDelXTo_B = 6.69
+    cfVTmax = 1.059 ; Default Cf etching model based on unannealed induced, constant-core model
+    cfDelXTo = 6.68
+    cfDelXTo_B = 5.158
     cfTrueLen = cfDelXTo + 2.*cfDelXTo_B
   endif else begin
     numUTracks = numTracks
@@ -293,37 +368,38 @@ Pro CalcRevelationRates, vB, vTmax, delXTo, delXTo_B, EXTERNAL=external, CF=cf, 
 ; Intersection points.  Random along tracks for internal, on short side for external
   xInts = trueLen * RandomU(seed,numTracks)   
   if Keyword_Set(external) then xInts *= 0.5
-  if Keyword_Set(cf) then xInts[numUTracks:numTracks-1] = cfTrueLen - cfLen + RandomN(seed,numCfTracks)*cfLenSD
+; Cf tracks have distribution according to UT measurements; make sure xInt < total length to avoid numerical error
+  if Keyword_Set(cf) then xInts[numUTracks:numTracks-1] = (cfTrueLen - cfLen + RandomN(seed,numCfTracks)*cfLenSD) < (cfTrueLen - 0.01)
 
-  ndAtTime = FltArr(numDepths,numTimes)  
-  revAtTime = FltArr(numDepths, numTimes)
+  ndAtTime = FltArr(numDepths,numTimes)  ; Number of tracks that have penetrated to each depth at each time
+  revAtTime = FltArr(numDepths, numTimes) ; Increase in revelation ability at each depth and time
   
-  td = FltArr(numTracks,numDepths) ; time required to get to depths from depthInc to depthInc*numDepths microns for each track
+  td = FltArr(numTracks,numDepths) ; Time required to get to depths from depthInc to depthInc*numDepths microns for each track
   for d=0,numDepths-1 do begin
     for i=0L,numUTracks-1 do td[i,d] = VTXL_ConstantCore((d+1.)*depthInc/sin(dips[i]), xInts[i], ts, vB, vTmax, delXTo, delXTo_B)
     for i=numUTracks,numTracks-1 do td[i,d] = VTXL_ConstantCore((d+1.)*depthInc/sin(dips[i]), xInts[i], ts, vB, cfVTmax, cfDelXTo, cfDelXTo_B)
     for t=0,numTimes-1 do begin
       ndAtTime[d,t] = Total(td[*,d] LE (t+1)*timeInc)/numTracks
-      revAtTime[d,t] = Total(((t+1)*timeInc-td[*,d]) > 0)
+      revAtTime[d,t] = Total(((t+1)*timeInc-td[*,d]) > 0)   ; Sum radial growth from bulk etching of each semi-track that has reached this depth.
     endfor
-    
   endfor
   
   nrevAtTime = revAtTime/Max(revAtTime)
-  revCDF = nrevAtTime
+  revCDF = nrevAtTime     ; CDF of revelation rate.  Probability of revelation at any time and depth is proportional to rate
+  revCDF[*,1:numTimes-1] -= nRevAtTime[*,0:numTimes-2]
   for i=1,N_Elements(revCDF)-1 do revCDF[i] += revCDF[i-1]
   revCDF /= revCDF[N_Elements(revCDF)-1]
   
   if Keyword_Set(show) then begin
-    print, nrevAtTime
+;    print, nrevAtTime
     ts = Round(1./timeInc)
-    ndPlot = plot(ndAtTime[*,0],(IndGen(numDepths)+1)*depthInc, XTITLE="Relative Semi-Track Penetration", YTITLE="Depth (µm)", YRANGE=[20,0], XRANGE=[0,1], $
+    ndPlot = plot(ndAtTime[*,ts-1],(IndGen(numDepths)+1)*depthInc, XTITLE="Relative Semi-Track Penetration", YTITLE="Depth (µm)", YRANGE=[20,0], XRANGE=[0,1], $
         XTICKLEN=defTickLen, YTICKLEN=defTickLen) ;, FONT_NAME="Calibri")
-    for i=ts,numTimes-1,ts do ndPlot = plot(ndAtTime[*,i],(IndGen(numDepths)+1)*depthInc,/OVERPLOT)
+    for i=2*ts-1,numTimes-1,ts do ndPlot = plot(ndAtTime[*,i],(IndGen(numDepths)+1)*depthInc,/OVERPLOT)
 
-    revPlot = plot(nRevAtTime[*,0],(IndGen(numDepths)+1)*depthInc, XTITLE="Relative Confined Track Revelation", YTITLE="Depth (µm)", YRANGE=[20,0], XRANGE=[0,1], $
+    revPlot = plot(nRevAtTime[*,ts-1],(IndGen(numDepths)+1)*depthInc, XTITLE="Relative Confined Track Revelation", YTITLE="Depth (µm)", YRANGE=[20,0], XRANGE=[0,1], $
         XTICKLEN=defTickLen, YTICKLEN=defTickLen) ;, FONT_NAME="Calibri")
-    for i=ts,numTimes-1,ts do revPlot = plot(nRevAtTime[*,i],(IndGen(numDepths)+1)*depthInc,/OVERPLOT)
+    for i=2*ts-1,numTimes-1,ts do revPlot = plot(nRevAtTime[*,i],(IndGen(numDepths)+1)*depthInc,/OVERPLOT)
     
     plot, revCDF
   endif
@@ -357,7 +433,7 @@ end
 ;   NUM_TRACKS: How many random tracks to generate (default 10,000)
 ;   MAX_DIP: Maximum dip for a confined track measurement (degrees, default 10)
 ;   EX_TIP_ZONE: Length of tip region to exclude from intersection (µm, default 1)
-;   MAX_TIP_VTVB: Maximum etch rate ratio vT/vB for tip to be considered well etched (default 12)
+;   MAX_TIP_VTVB: Maximum etch rate ratio vT/vB for tip to be considered well etched (default 12); used if first step >= 20 or TIP_SELECTION set
 ;   UNDERETCH_BIAS: Power law term for simulating under-etched track selection bias (default 3.)
 ;   SURFACE_BUFFER: Minimum depth for track tip not to intersect surface (µm, default 0.5)
 ;   ETCH_TIME: Etching time if a single-step etch (seconds, default 20)
@@ -366,17 +442,19 @@ end
 ;   OPT_FIRST_STEP: Optimize tracks selected in first step to match mean track length (µm)
 ;   SD_LEN: Standard deviation of generated latent track lengths (µm)
 ;   CONTINUOUS_CULL: Set to cull semi-tracks only at the time steps they become exposed, matching Jonckheere et al. (2017) protocol
+;   TIP_SELECTION: Set to use MAX_TIP_VTVB criterion for selection, even if etch time is less than 20 seconds.
 ;
 ; TO DO
 ; - Add option for length biasing in track selection when there are a range of lengths. Matters <0.02 µm at SD=0.5, though
 ;
 ; MODIFICATION HISTORY
 ;   WRITTEN BY: Richard Ketcham, June 2020
+; May 2021 RAK: Added TIP_SELECTION flag.
 
 Pro GenerateTrackSet, vB, vTmax, delXTo, delXTo_B, SHOW=show, EXTERNAL=external, NUM_TRACKS=nTracks, $
   DEPTH_INC=depthInc, TIME_INC=timeInc, MAX_TIP_VTVB=maxTipVTVB, ETCH_TIME=etchTime, SURFACE_BUFFER=surfaceBuffer, $
   MAX_DIP=maxDip, EX_TIP_ZONE = exTipZone, STEPS=steps, STEP_RESULTS=stepResults, CF=cf, OPT_FIRST_STEP=optFirstStep, $
-  SD_LEN=sdLen, UNDERETCH_BIAS=underetchBias, CONTINUOUS_CULL=continuousCull
+  SD_LEN=sdLen, UNDERETCH_BIAS=underetchBias, CONTINUOUS_CULL=continuousCull, TIP_SELECTION=tipSelection
 
   if (N_Params() LT 1) then vB = 0.022
   if (N_Params() LT 2) then vTmax = 0.83
@@ -406,16 +484,15 @@ Pro GenerateTrackSet, vB, vTmax, delXTo, delXTo_B, SHOW=show, EXTERNAL=external,
   tsGen = RandomU(seed,nTracks)
   ts = FltArr(nTracks)
   zInt = ts
-  for i=0, nTracks-1 do begin
-    ind = (Where(tsGen[i] LE revCDF))[0]
-    inds = Array_Indices(revCDF,ind)
-    ts[i] = (inds[1]+1)*timeInc
-    zInt[i] = (inds[0]+1)*depthInc
-    cont[inds[1],inds[0]] += 1
-  endfor
+
+  dcInd = FindCDFIndices(revCDF,tsGen)
+  inds = Array_Indices(revCDF,dcInd)
+  ts[*] = (inds[1,*]+1)*timeInc
+  zInt[*] = (inds[0,*]+1)*depthInc
   
   if Keyword_Set(show) then begin
 ;    tsdplot = Plot(ts, zInt, XTITLE="Start Time (s)", YTITLE="Depth (um)", YRANGE=[20,0], SYMBOL="+", LINESTYLE=6)
+    for i=0,nTracks-1 do cont[inds[1,i],inds[0,i]] += 1
     ct = ColorTable(72, /reverse)
     titleLine = "All Tracks " + (Keyword_Set(external) ? "(External Surface)" : "") + " (N=" + StrTrim(String(nTracks),2) + ")"
     contPlot = Contour(cont,(IndGen(numTimes)+1)*timeInc,(IndGen(numDepths)+1)*depthInc,/FILL,RGB_TABLE=ct, YRANGE=[20,0], XTITLE="Start Time (s)", $
@@ -426,6 +503,7 @@ Pro GenerateTrackSet, vB, vTmax, delXTo, delXTo_B, SHOW=show, EXTERNAL=external,
 ; Randomize track dips (in radians)
   dips = ASin((RandomU(seed,nTracks))*sin(maxDip/!radeg))
 ;  plot, Histogram(dips*!radeg)
+;  print, "% total dips below 10 deg = ", Total(dips LT 10./!radeg)/N_Elements(dips)
   
 ; Generate latent track lengths, and variation if requested
   if Keyword_Set(sdLen) then begin
@@ -434,8 +512,12 @@ Pro GenerateTrackSet, vB, vTmax, delXTo, delXTo_B, SHOW=show, EXTERNAL=external,
     delXTos = disp*coreFrac + delXTo
     delXTo_Bs = disp*(1-coreFrac)/2. + delXTo_B
     latentLengths = delXTos + 2.*delXTo_Bs
+;    blatentLengths = GenerateLatentLengths(nTracks,delXTo + 2.*delXTo_B, sdLen, EX_TIP_ZONE=exTipZone) ; Get biased distribution
+;    coreFrac = delXTo/(delXTo + 2.*delXTo_B)  ; Distribute variation evenly between core and tip zones
+;    bdelXTos = blatentLengths*coreFrac
+;    bdelXTo_Bs = blatentLengths*(1-coreFrac)/2.
   endif else latentLengths = FltArr(nTracks) + delXTo + 2.*delXTo_B
-  
+   
 ; Randomize intersection points
   xInts = RandomU(seed,nTracks)*(latentLengths - 2.*exTipZone) + exTipZone
   
@@ -464,7 +546,9 @@ Pro GenerateTrackSet, vB, vTmax, delXTo, delXTo_B, SHOW=show, EXTERNAL=external,
       cb = ColorBar(TITLE='Number of Tracks',POSITION=[0.24,0.06,0.80,0.09])
     endif
   endif else nConfTracks = nTracks
-  
+;  oplot, Histogram(dips*!radeg)
+;  print, "% confined dips below 10 deg = ", Total(dips LT 10./!radeg)/N_Elements(dips)  
+
 ; Calculate confined track lengths and tip etch ratios
   tip1s = FltArr(nConfTracks)
   tip2s = tip1s
@@ -516,8 +600,9 @@ Pro GenerateTrackSet, vB, vTmax, delXTo, delXTo_B, SHOW=show, EXTERNAL=external,
   endif
   
 ; Cull the under-etched ones
-  if (duration LT 20) then $
-    selectedTracks = Where(((((etchedLengths - 4.5)/5.5)>0)^underetchBias GT RandomU(seed,nConfTracks)) AND (ts LE (duration-3.)), nSelTracks) $
+  if (duration LT 20) AND NOT Keyword_Set(tipSelection) then $
+;    selectedTracks = Where(((((etchedLengths - 4.5)/5.5)>0)^underetchBias GT RandomU(seed,nConfTracks)) AND (ts LE (duration-3.)), nSelTracks) $
+    selectedTracks = Where(((((etchedLengths - 2.)/7.)>0)^underetchBias GT RandomU(seed,nConfTracks)) AND (ts LE (duration-3.)), nSelTracks) $
   else selectedTracks = Where((tip1s LE maxTipVTVB) AND (tip2s LE maxTipVTVB) AND (etchedLengths GT 4.0),nSelTracks)
   selLengths = etchedLengths[selectedTracks] 
   latentLengths = latentLengths[selectedTracks]
@@ -577,7 +662,7 @@ Pro GenerateTrackSet, vB, vTmax, delXTo, delXTo_B, SHOW=show, EXTERNAL=external,
       YTITLE="Depth (µm)", TITLE=titleLine, POSITION=[0.08,0.17,0.96,0.93], XTICKLEN=defTickLen, YTICKLEN=defTickLen)
     cb = ColorBar(TITLE='Number of Tracks',POSITION=[0.24,0.06,0.80,0.09])
     elHistPlot = BarPlot(Histogram(selLengths,BINSIZE=1, MIN=0),/HISTOGRAM, TITLE="Etched and Selected Lengths", $
-      XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+      XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen);, YRANGE=[0,2.3e5]) ; For rescaling when necessary
     elHistPlot = BarPlot(elHist,/HISTOGRAM,/OVERPLOT,TRANSPARENCY=50)
     
     lenInc = depthInc
@@ -690,13 +775,14 @@ Function VTXFit1a, c
   delVTo_B = (c[2]-c[1])/2.
 
 ; Set defaults
-  tdr = N_Elements(tdRes) ? tdRes : 0.5 
+  tdr = N_Elements(tdRes) ? tdRes : 0.2 
   ext = N_Elements(exTip) ? exTip : 2.
   nt = N_Elements(nTracks) ? nTracks : 100000L
   md = N_Elements(maxDip) ? maxDip : 25.
   mtvtvb = N_Elements(maxTipVTVB) ? maxTipVTVB : 12.
   ueb = N_Elements(underetchBias) ? underetchBias : 3.
-  sdl = N_Elements(sdLen) ? sdLen : 0.   
+  sdl = N_Elements(sdLen) ? sdLen : 0.8   
+  chisq = N_Elements(chisq) ? chisq : 1
 
   GenerateTrackSet, 0.022, c[0], c[1], delVTo_B, STEPS = [10,20,25,30], STEP_RESULTS=se2mod, DEPTH_INC=tdr, TIME_INC=tdr, EX_TIP=ext, NUM_TRACKS=nt, MAX_DIP=md, UNDERETCH_BIAS=ueb, SD_LEN=sdl
   GenerateTrackSet, 0.022, c[0], c[1], delVTo_B, STEPS = [20,25,30], STEP_RESULTS=se1mod, DEPTH_INC=tdr, TIME_INC=tdr, EX_TIP=ext, NUM_TRACKS=nt,MAX_DIP=md, MAX_TIP_VTVB=mtvtvb, SD_LEN=sdl
@@ -708,7 +794,10 @@ Function VTXFit1a, c
   return, sumsq
 End
 
-
+; Pro RunFirstFit
+;
+; Runs 20 iterations of the best-fit set of parameters (hardwired) for each constant-core model
+; to see how much variation there is due to randomizations.
 Pro RunFirstFit
 
   numIter = 20
@@ -720,12 +809,12 @@ Pro RunFirstFit
   md = 25.
   mtvtvb = 12.
   ueb = 3.
-  sdl = 0.5
+  sdl = 0.8
 
   se1_2mtl = [15.77, 16.34, 16.92, 9.89, 16.19, 16.99, 17.18]
   se1_2semtl = [0.079, 0.084, 0.091, 0.175, 0.071, 0.073, 0.076]
   dof = 6
-  c = [1.33396, 4.11996, 16.9621]
+  c = [1.63913,0.744537,17.0173]
   delVTo_B = (c[2]-c[1])/2.
   se1res = FltArr(8,numIter)
   for i=0,numIter-1 do begin
@@ -739,7 +828,7 @@ Pro RunFirstFit
   se3mtl = [9.11, 13.03, 14.89, 15.43, 15.69, 14.43]
   se3semtl = [0.303, 0.284, 0.107, 0.110, 0.111, 0.083]
   dof = 5.
-  c = [0.824168, 8.67620, 15.4636]
+  c = [1.05432,5.47737,15.5717]
   delVTo_B = (c[2]-c[1])/2.
   se3res = FltArr(7,numIter)
   for i=0,numIter-1 do begin
@@ -753,7 +842,7 @@ Pro RunFirstFit
   se4mtl = [12.33,12.64,12.93,11.25]
   se4semtl = [0.072, 0.070, 0.069,0.123]
   dof = 3.
-  c = [3.35674,0.760329,12.4503]
+  c = [3.10868,0.775253,12.3955]
   delVTo_B = (c[2]-c[1])/2.
   se4res = FltArr(5,numIter)
   for i=0,numIter-1 do begin
@@ -767,7 +856,7 @@ Pro RunFirstFit
   se5mtl = [12.58,13.48,13.87,14.15,11.76]
   se5semtl = [0.094, 0.090, 0.089, 0.089,0.140]
   dof = 4.
-  c = [1.76682,11.3476,13.3913]
+  c = [3.08296,0.262593,13.5808]
   delVTo_B = (c[2]-c[1])/2.
   se5res = FltArr(6,numIter)
   for i=0,numIter-1 do begin
@@ -781,7 +870,7 @@ Pro RunFirstFit
   se6mtl = [13.77,15.13,15.34,15.65,13.38]
   se6semtl = [0.132, 0.078, 0.079, 0.078, 0.125]
   dof = 4
-  c = [4.03698,0.188842,15.1048]
+  c = [3.59156,0.262683,15.0994]
   delVTo_B = (c[2]-c[1])/2.
   se6res = FltArr(6,numIter)
   for i=0,numIter-1 do begin
@@ -797,9 +886,13 @@ Pro RunFirstFit
   print, se4res
   print, se5res
   print, se6res
-
 End
 
+
+; Pro RunSecondFit
+;
+; Runs 20 iterations of the best-fit set of parameters (hardwired) for each linear model
+; to see how much variation there is due to randomizations.
 Pro RunSecondFit
 
   numIter = 20
@@ -811,19 +904,20 @@ Pro RunSecondFit
   md = 25.
   mtvtvb = 12.
   ueb = 3.
-  sdl = 0.5
+  sdl = 0.8
 
   delVTo = 0.0
 
   se1_2mtl = [15.77, 16.34, 16.92, 9.89, 16.19, 16.99, 17.18]
   se1_2semtl = [0.079, 0.084, 0.091, 0.175, 0.071, 0.073, 0.076]
   dof = 6
-  c = [1.69570,17.0191]
+  c = [1.70000,17.0000]
   delVTo_B = (c[1]-delVTo)/2.
   se1res = FltArr(8,numIter)
   for i=0,numIter-1 do begin
     GenerateTrackSet, 0.022, c[0], delVTo, delVTo_B, STEPS = [20,25,30], STEP_RESULTS=se1mod, DEPTH_INC=tdr, TIME_INC=tdr, EX_TIP=ext, NUM_TRACKS=nt,MAX_DIP=md, MAX_TIP_VTVB=mtvtvb, SD_LEN=sdl
     GenerateTrackSet, 0.022, c[0], delVTo, delVTo_B, STEPS = [10,20,25,30], STEP_RESULTS=se2mod, DEPTH_INC=tdr, TIME_INC=tdr, EX_TIP=ext, NUM_TRACKS=nt, MAX_DIP=md, UNDERETCH_BIAS=ueb, SD_LEN=sdl
+    se1res[0:2,i] = se1mod
     se1res[3:6,i] = se2mod
     se1res[7,i] = Total(((se1_2mtl - se1res[0:6,i])/se1_2semtl)^2)/dof
   endfor
@@ -831,7 +925,7 @@ Pro RunSecondFit
   se3mtl = [9.11, 13.03, 14.89, 15.43, 15.69, 14.43]
   se3semtl = [0.303, 0.284, 0.107, 0.110, 0.111, 0.083]
   dof = 5.
-  c = [1.54455,15.6235]
+  c = [1.49538,15.6683]
   delVTo_B = (c[1]-delVTo)/2.
   se3res = FltArr(7,numIter)
   for i=0,numIter-1 do begin
@@ -845,7 +939,7 @@ Pro RunSecondFit
   se4mtl = [12.33,12.64,12.93,11.25]
   se4semtl = [0.072, 0.070, 0.069,0.123]
   dof = 3.
-  c = [3.58683, 12.4494]
+  c = [3.31707,12.4073]
   delVTo_B = (c[1]-delVTo)/2.
   se4res = FltArr(5,numIter)
   for i=0,numIter-1 do begin
@@ -859,7 +953,7 @@ Pro RunSecondFit
   se5mtl = [12.58,13.48,13.87,14.15,11.76]
   se5semtl = [0.094, 0.090, 0.089, 0.089,0.140]
   dof = 4.
-  c = [3.54415, 13.5862]
+  c = [3.12818,13.5791]
   delVTo_B = (c[1]-delVTo)/2.
   se5res = FltArr(6,numIter)
   for i=0,numIter-1 do begin
@@ -873,7 +967,7 @@ Pro RunSecondFit
   se6mtl = [13.77,15.13,15.34,15.65,13.38]
   se6semtl = [0.132, 0.078, 0.079, 0.078, 0.125]
   dof = 4
-  c = [4.08988,15.1013]
+  c = [3.59980,15.1077]
   delVTo_B = (c[1]-delVTo)/2.
   se6res = FltArr(6,numIter)
   for i=0,numIter-1 do begin
@@ -946,13 +1040,14 @@ Function VTXFit1SE6, c
   delVTo_B = (c[2]-c[1])/2.
 
 ; Set defaults
-  tdr = N_Elements(tdRes) ? tdRes : 0.5
+  tdr = N_Elements(tdRes) ? tdRes : 0.5 
   ext = N_Elements(exTip) ? exTip : 2.
   nt = N_Elements(nTracks) ? nTracks : 100000L
   md = N_Elements(maxDip) ? maxDip : 25.
   mtvtvb = N_Elements(maxTipVTVB) ? maxTipVTVB : 12.
   ueb = N_Elements(underetchBias) ? underetchBias : 3.
-  sdl = N_Elements(sdLen) ? sdLen : 0.   ; or 0.5?
+  sdl = N_Elements(sdLen) ? sdLen : 0.8   
+  chisq = N_Elements(chisq) ? chisq : 1
 
   GenerateTrackSet, 0.022, c[0], c[1], delVTo_B, STEPS = [15,20,25,30], STEP_RESULTS=se6mod, DEPTH_INC=tdr, TIME_INC=tdr, EX_TIP=ext, NUM_TRACKS=nt, MAX_DIP=md, UNDERETCH_BIAS=ueb, SD_LEN=sdl
   GenerateTrackSet, 0.022, c[0], c[1], delVTo_B, STEPS = [10], STEP_RESULTS=eae3mod, DEPTH_INC=tdr, TIME_INC=tdr, EX_TIP=ext, NUM_TRACKS=nt,MAX_DIP=md, UNDERETCH_BIAS=ueb, SD_LEN=sdl
@@ -1273,10 +1368,13 @@ End
 
 Pro FirstFitTryManual, initTry
   Common fitRecord, fileUnit, tdRes, nTracks, exTip, maxDip, maxTipVTVB, underetchBias, sdLen, chiSq
-  maxTipVTVB = 12
-  tdRes = 0.5
-  exTip = 2.5
-  chiSq = 1
+
+  chisq = 1
+  tdRes = 0.2
+
+  maxTipVTVB = 12.
+  underetchBias = 3.0
+  sdLen = 0.5
   if (N_Params() EQ 0) then initTry = [1.0,9.,17.]
   scale = [0.1,1.5,0.1]
   result = Amoeba(1.e-4,SCALE=scale,P0=initTry,FUNCTION_NAME='VTXFit1a',FUNCTION_VALUE=fVal, NMAX=50)
@@ -1314,7 +1412,7 @@ Pro FirstFitTrySpon, initTry
 End
 
 Pro FirstFitTrySE6, initTry
-  if (N_Params() EQ 0) then initTry = [2.0,11.6,15.0]
+  if (N_Params() EQ 0) then initTry = [3.3,1.0,15.1]
   scale = [0.1,1.,0.3]
   result = Amoeba(1.e-4,SCALE=scale,P0=initTry,FUNCTION_NAME='VTXFit1SE6',FUNCTION_VALUE=fVal, NMAX=50)
   if N_Elements(result) EQ 1 then print, "Fail" $
@@ -1392,68 +1490,79 @@ Pro RecordFits1
   
   maxTipVTVB = 12.
   underetchBias = 3.0
-  sdLen = 0.5
+  sdLen = 0.8
 
-  OpenW, fileUnit, "C:\Temp\VTXfitSE1+2_12-3e_x2.txt"
-  FirstFitTry, [1.0,9.,16.8]
-  FirstFitTry, [1.0,9.,17.2]
-  FirstFitTry, [1.0,5.,16.8]
-  FirstFitTry, [1.0,5.,17.2]
-  FirstFitTry, [1.4,9.,16.8]
-  FirstFitTry, [1.4,9.,17.2]
-  FirstFitTry, [1.4,5.,16.8]
-  FirstFitTry, [1.4,5.,17.2]
-  FirstFitTry, [1.45,3.5,17.0]
-  FirstFitTry, [1.6,1.,17.1]
-  FirstFitTry, [1.35,3.5,16.9]
-  FirstFitTry, [1.35,4.0,17.0]
-  FirstFitTry, [1.55,1.1,17.0]
-  FirstFitTry, [1.57,1.3,16.9]
+  OpenW, fileUnit, "C:\Temp\VTXfitSE1+2_12-3e_x2x.txt"
+;  FirstFitTry, [1.0,9.,16.9]
+;  FirstFitTry, [1.1,9.,17.2]
+;  FirstFitTry, [1.0,7.,16.9]
+;  FirstFitTry, [1.1,7.,17.2]
+;  FirstFitTry, [1.0,6.,16.9]
+;  FirstFitTry, [1.2,6.,17.2]
+;  FirstFitTry, [1.1,5.,16.9]
+;  FirstFitTry, [1.3,5.,17.2]
+;  FirstFitTry, [1.1,4.,17.2]
+;  FirstFitTry, [1.3,4.,16.9]
+;  FirstFitTry, [1.2,3.,17.2]
+;  FirstFitTry, [1.4,3.,16.9]
+;  FirstFitTry, [1.3,2.,16.9]
+;  FirstFitTry, [1.5,2.,17.2]
+;  FirstFitTry, [1.4,1.,16.9]
+;  FirstFitTry, [1.6,1.,17.2]
+;  FirstFitTry, [1.45,0.2,16.9]
+
+;  FirstFitTry, [1.55,1.5,17.1]
+;  FirstFitTry, [1.65,0.5,17.1]
+
+  FirstFitTry, [1.54,1.5,17.0]
+  FirstFitTry, [1.6,1.0,17.0]
+
   Close, fileUnit
+;
+;  OpenW, fileUnit, "C:\Temp\VTXfitSE3_12-3e_x2x.txt"
+;  FirstFitTrySpon, [0.6,10.,15.7]
+;  FirstFitTrySpon, [0.8,10.,15.2]
+;  FirstFitTrySpon, [0.7,8.,15.7]
+;  FirstFitTrySpon, [0.9,8.,15.2]
+;  FirstFitTrySpon, [0.9,5.,15.7]
+;  FirstFitTrySpon, [1.1,5.,15.2]
+;  FirstFitTrySpon, [1.3,3.,15.7]
+;  FirstFitTrySpon, [1.1,3.,15.2]
+;  FirstFitTrySpon, [1.2,1.,15.7]
+;  FirstFitTrySpon, [1.4,1.,15.7]
+;  FirstFitTrySpon, [1.35,0.2,15.7]
+  
+;  FirstFitTrySpon, [1.1,4.5,15.6]
+;  FirstFitTrySpon, [1.15,4.,15.6]
+;  FirstFitTrySpon, [1.2,3.5,15.6]
+;  FirstFitTrySpon, [1.25,3.,15.6]
+;  Close, fileUnit
 
-  OpenW, fileUnit, "C:\Temp\VTXfitSE3_12-3e_x2.txt"
-  FirstFitTrySpon, [0.7,10.,15.7]
-  FirstFitTrySpon, [0.7,10.,15.2]
-  FirstFitTrySpon, [0.7,5.,15.7]
-  FirstFitTrySpon, [0.7,5.,15.2]
-  FirstFitTrySpon, [1.4,10.,15.7]
-  FirstFitTrySpon, [1.4,10.,15.2]
-  FirstFitTrySpon, [1.4,5.,15.7]
-  FirstFitTrySpon, [1.4,5.,15.2]
-  FirstFitTrySpon, [1.2,3.,15.7]
-  FirstFitTrySpon, [1.1,4.,15.7]
-  FirstFitTrySpon, [1.05,5.,15.6]
-  Close, fileUnit
-
-  OpenW, fileUnit, "C:\Temp\VTXfitSE6_12-3e_x2.txt"
-  FirstFitTrySE6, [3.2,8.,14.8]
-  FirstFitTrySE6, [3.2,8.,15.3]
-  FirstFitTrySE6, [3.2,2.,14.8]
-  FirstFitTrySE6, [3.2,2.,15.3]
-  FirstFitTrySE6, [2.4,8.,14.8]
-  FirstFitTrySE6, [2.4,8.,15.3]
-  FirstFitTrySE6, [2.4,2.,14.8]
-  FirstFitTrySE6, [2.4,2.,15.3]
-  FirstFitTrySE6, [3.0,5.,15.1]
-  FirstFitTrySE6, [4.0,0.,15.1]
-  FirstFitTrySE6, [2.7,3.35,15.1]
-  FirstFitTrySE6, [2.6,3.3,15.2]
-  FirstFitTrySE6, [3.7,1.0,15.1]
-  FirstFitTrySE6, [3.6,1.0,15.2]
-  FirstFitTrySE6, [2.8,5.0,15.2]
-  FirstFitTrySE6, [2.7,5.1,15.1]
-  FirstFitTrySE6, [3.9,0.5,15.2]
-  FirstFitTrySE6, [3.8,0.6,15.1]
-  FirstFitTrySE6, [3.5,2.0,15.2]
-  FirstFitTrySE6, [3.55,1.3,15.1]
-  FirstFitTrySE6, [3.4,2.7,15.2]
-  FirstFitTrySE6, [3.15,3.75,15.1]
-  FirstFitTrySE6, [2.9,4.7,15.1]
-  FirstFitTrySE6, [3.35,2.75,15.1]
-  FirstFitTrySE6, [3.3,2.7,15.0]
-  FirstFitTrySE6, [3.15,3.5,15.1]
-  FirstFitTrySE6, [3.1,3.7,15.0]
-  FirstFitTrySE6, [3.1,4.,15.1]
+  OpenW, fileUnit, "C:\Temp\VTXfitSE6_12-3e_x2x.txt"
+;  FirstFitTrySE6, [3.0,2.,14.8]
+;  FirstFitTrySE6, [3.5,2.,15.3]
+;  FirstFitTrySE6, [2.6,8.,14.8]
+;  FirstFitTrySE6, [2.4,8.,15.3]
+;  FirstFitTrySE6, [2.4,6.,14.8]
+;  FirstFitTrySE6, [2.7,6.,15.3]
+;  FirstFitTrySE6, [2.8,5.,15.3]
+;  FirstFitTrySE6, [2.5,5.,14.8]
+;  FirstFitTrySE6, [2.6,4.,15.3]
+;  FirstFitTrySE6, [3.0,4.,14.8]
+;  FirstFitTrySE6, [2.7,3.,15.3]
+;  FirstFitTrySE6, [3.2,3.,14.8]
+;  FirstFitTrySE6, [3.4,2.,14.8]
+;  FirstFitTrySE6, [2.9,2.,15.3]
+;  FirstFitTrySE6, [3.2,1.,15.3]
+;  FirstFitTrySE6, [3.6,1.,14.8]
+;  FirstFitTrySE6, [3.4,0.1,14.8]
+;  FirstFitTrySE6, [3.8,0.1,15.3]
+  
+;  FirstFitTrySE6, [3.1,2.5,15.1]
+;  FirstFitTrySE6, [3.2,2.0,15.1]
+;  FirstFitTrySE6, [3.5,0.5,15.1]
+;  
+  FirstFitTrySE6, [3.5,0.7,15.05]
   Close, fileUnit
 End
 
@@ -1468,69 +1577,76 @@ Pro RecordFits1a
 
   maxTipVTVB = 12.
   underetchBias = 3.0
-  sdLen = 0.5
+  sdLen = 0.8
 
-;  OpenW, fileUnit, "C:\Temp\VTXfitSE5_12-3e_x2.txt"
+  OpenW, fileUnit, "C:\Temp\VTXfitSE5_12-3e_x2x.txt"
 ;  FirstFitTrySE5, [1.4,13.,13.8]
-;  FirstFitTrySE5, [1.4,13.,13.0]
-;  FirstFitTrySE5, [1.4,10.,13.8]
-;  FirstFitTrySE5, [1.4,10.,13.0]
-;  FirstFitTrySE5, [2.0,13.,13.8]
-;  FirstFitTrySE5, [2.0,13.,13.0]
-;  FirstFitTrySE5, [2.0,10.,13.8]
-;  FirstFitTrySE5, [2.0,10.,13.0]
-;  FirstFitTrySE5, [1.9,8.5,13.4]
-;  FirstFitTrySE5, [1.8,8.3,13.6]
-;  FirstFitTrySE5, [2.0,8.0,13.4]
-;  FirstFitTrySE5, [2.1,8.1,13.6]
-;  FirstFitTrySE5, [2.05,7.5,13.6]
-;  FirstFitTrySE5, [2.1,7.4,13.4]
-;  FirstFitTrySE5, [1.85,9.5,13.4]
-;  FirstFitTrySE5, [1.95,8.7,13.5]
-;  FirstFitTrySE5, [1.92,8.8,13.5]
-;  FirstFitTrySE5, [1.9,8.9,13.5]
-;  FirstFitTrySE5, [1.85,8.8,13.5]
-;  FirstFitTrySE5, [1.95,8.2,13.5]
-;  Close, fileUnit
+;  FirstFitTrySE5, [1.7,13.,13.3]
+;  FirstFitTrySE5, [1.4,12.,13.8]
+;  FirstFitTrySE5, [1.7,12.,13.3]
+;  FirstFitTrySE5, [1.5,11.,13.8]
+;  FirstFitTrySE5, [1.8,11.,13.3]
+;  FirstFitTrySE5, [1.5,10.,13.3]
+;  FirstFitTrySE5, [1.8,10.,13.8]
+;  FirstFitTrySE5, [1.6,9.,13.3]
+;  FirstFitTrySE5, [1.9,9.,13.8]
+;  FirstFitTrySE5, [1.7,8.,13.8]
+;  FirstFitTrySE5, [2.0,8.,13.3]
+;  FirstFitTrySE5, [1.7,7.,13.3]
+;  FirstFitTrySE5, [2.0,7.,13.8]
+;  FirstFitTrySE5, [1.7,6.,13.8]
+;  FirstFitTrySE5, [2.1,6.,13.3]
+;  FirstFitTrySE5, [1.8,5.,13.3]
+;  FirstFitTrySE5, [2.2,5.,13.8]
+;  FirstFitTrySE5, [2.0,4.,13.3]
+;  FirstFitTrySE5, [2.4,4.,13.8]
+;  FirstFitTrySE5, [2.2,3.,13.8]
+;  FirstFitTrySE5, [2.6,3.,13.3]
+;  FirstFitTrySE5, [2.4,2.,13.8]
+;  FirstFitTrySE5, [2.8,2.,13.3]
+;  FirstFitTrySE5, [3.0,1.,13.8]
+;  FirstFitTrySE5, [2.6,1.,13.3]
+;  FirstFitTrySE5, [3.3,1.,13.8]
+;  FirstFitTrySE5, [2.9,1.,13.3]
+
+  FirstFitTrySE5, [2.4,3.5,13.6]
+  FirstFitTrySE5, [2.55,2.5,13.6]
+  FirstFitTrySE5, [2.8,1.5,13.6]
+  Close, fileUnit
 
   OpenW, fileUnit, "C:\Temp\VTXfitSE4_12-3e_x2x.txt"
-;  FirstFitTrySE4, [1.4,11.,12.8]
-;  FirstFitTrySE4, [1.4,11.,12.0]
-;  FirstFitTrySE4, [1.4,7.,12.8]
-;  FirstFitTrySE4, [1.4,7.,12.0]
-;  FirstFitTrySE4, [2.0,11.,12.8]
-;  FirstFitTrySE4, [2.0,11.,12.0]
-;  FirstFitTrySE4, [2.0,7.,12.8]
-;  FirstFitTrySE4, [2.0,7.,12.0]
-;  FirstFitTrySE4, [1.9,8.,12.3]
-;  FirstFitTrySE4, [2.45,4.,12.4]
-;  FirstFitTrySE4, [2.7,3.,12.5]
-;  FirstFitTrySE4, [3.,2.,12.5]
-;  FirstFitTrySE4, [3.3,1.,12.5]
-;  FirstFitTrySE4, [2.4,5.,12.4]
-;  FirstFitTrySE4, [2.4,4.9,12.6]
-;  FirstFitTrySE4, [2.6,3.5,12.4]
-;  FirstFitTrySE4, [2.6,3.4,12.6]
-;  FirstFitTrySE4, [2.85,2.5,12.4]
-;  FirstFitTrySE4, [2.85,2.4,12.6]
-;  FirstFitTrySE4, [3.2,1.5,12.4]
-;  FirstFitTrySE4, [3.2,1.4,12.6]
-;  FirstFitTrySE4, [2.3,5.0,12.4]
-;  FirstFitTrySE4, [2.2,4.9,12.6]
-;  FirstFitTrySE4, [2.5,3.5,12.4]
-;  FirstFitTrySE4, [2.55,3.7,12.6]
-;  FirstFitTrySE4, [3.1,1.5,12.4]
-;  FirstFitTrySE4, [3.15,1.7,12.6]
-;  FirstFitTrySE4, [2.8,2.8,12.4]
-;  FirstFitTrySE4, [2.76,3.0,12.6]
-;  FirstFitTrySE4, [1.8,9.5,12.3]
-;  FirstFitTrySE4, [1.9,8.0,12.3]
-;  FirstFitTrySE4, [1.85,9.0,12.3]
-;  FirstFitTrySE4, [1.87,8.5,12.3]
-;  FirstFitTrySE4, [2.95,2.25,12.4]
-  FirstFitTrySE4, [3.4,1.,12.4]
-  FirstFitTrySE4, [3.5,0.5,12.5]  
-  FirstFitTrySE4, [3.6,0.0,12.4]
+;  FirstFitTrySE4, [1.4,13.,12.6]
+;  FirstFitTrySE4, [1.7,13.,12.2]
+;  FirstFitTrySE4, [1.4,12.,12.6]
+;  FirstFitTrySE4, [1.7,12.,12.2]
+;  FirstFitTrySE4, [1.5,11.,12.6]
+;  FirstFitTrySE4, [1.8,11.,12.2]
+;  FirstFitTrySE4, [1.5,10.,12.2]
+;  FirstFitTrySE4, [1.8,10.,12.6]
+;  FirstFitTrySE4, [1.6,9.,12.2]
+;  FirstFitTrySE4, [1.9,9.,12.6]
+;  FirstFitTrySE4, [1.7,8.,12.6]
+;  FirstFitTrySE4, [2.0,8.,12.2]
+;  FirstFitTrySE4, [1.7,7.,12.2]
+;  FirstFitTrySE4, [2.0,7.,12.6]
+;  FirstFitTrySE4, [1.7,6.,12.6]
+;  FirstFitTrySE4, [2.1,6.,12.2]
+;  FirstFitTrySE4, [1.8,5.,12.2]
+;  FirstFitTrySE4, [2.2,5.,12.6]
+;  FirstFitTrySE4, [2.0,4.,12.2]
+;  FirstFitTrySE4, [2.4,4.,12.6]
+;  FirstFitTrySE4, [2.2,3.,12.6]
+;  FirstFitTrySE4, [2.6,3.,12.2]
+;  FirstFitTrySE4, [2.4,2.,12.6]
+;  FirstFitTrySE4, [2.8,2.,12.2]
+;  FirstFitTrySE4, [3.0,1.,12.6]
+;  FirstFitTrySE4, [2.6,1.,12.2]
+  FirstFitTrySE4, [2.4,4.,12.4]
+  FirstFitTrySE4, [2.7,2.5,12.3]
+  FirstFitTrySE4, [2.9,2.0,12.4]
+  FirstFitTrySE4, [3.0,1.5,12.3]
+  FirstFitTrySE4, [3.2,0.5,12.4]
+  FirstFitTrySE4, [3.3,0.1,12.3]
   Close, fileUnit
 End
 
@@ -1546,7 +1662,7 @@ Pro RecordFits2
   maxTipVTVB = 12.
   underetchBias = 3.0
 
-  sdLen = 0.5
+  sdLen = 0.8
   OpenW, fileUnit, "C:\Temp\VTXfit2SE1+2_12-3e_x2.txt"
   SecondFitTry, [1.4,16.8]
   SecondFitTry, [1.4,17.2]
@@ -1563,31 +1679,31 @@ Pro RecordFits2
   Close, fileUnit
 
   OpenW, fileUnit, "C:\Temp\VTXfit2SE6_12-3e_x2.txt"
-  SecondFitTrySE6, [3.5,14.8]
-  SecondFitTrySE6, [3.5,15.3]
-  SecondFitTrySE6, [4.5,14.8]
-  SecondFitTrySE6, [4.5,15.3]
+  SecondFitTrySE6, [3.1,14.8]
+  SecondFitTrySE6, [3.1,15.3]
+  SecondFitTrySE6, [4.1,14.8]
+  SecondFitTrySE6, [4.1,15.3]
   Close, fileUnit
 
   OpenW, fileUnit, "C:\Temp\VTXfit2SE5_12-3e_x2.txt"
-  SecondFitTrySE5, [3.0,13.9]
-  SecondFitTrySE5, [3.0,13.2]
-  SecondFitTrySE5, [4.1,13.9]
-  SecondFitTrySE5, [4.1,13.2]
+  SecondFitTrySE5, [2.6,13.9]
+  SecondFitTrySE5, [2.6,13.2]
+  SecondFitTrySE5, [3.6,13.9]
+  SecondFitTrySE5, [3.6,13.2]
   Close, fileUnit
 
   OpenW, fileUnit, "C:\Temp\VTXfit2SE4_12-3e_x2.txt"
-  SecondFitTrySE4, [3.0,12.9]
-  SecondFitTrySE4, [3.0,12.1]
-  SecondFitTrySE4, [4.1,12.9]
-  SecondFitTrySE4, [4.1,12.1]
+  SecondFitTrySE4, [2.7,12.9]
+  SecondFitTrySE4, [2.7,12.1]
+  SecondFitTrySE4, [3.7,12.9]
+  SecondFitTrySE4, [3.7,12.1]
   Close, fileUnit
 End
 
 
 ; Pro MakeModel1Plots
 ;
-; Creates a set of plots showing teh result of one or more fits to the data, and reports
+; Creates a set of plots showing the result of one or more fits to the data, and reports
 ; the best-fit model parameters and their confidence limits.
 ;
 ; INPUT:
@@ -1739,7 +1855,7 @@ End
 ;   Richard Ketcham, July 2020
 
 Pro GetSEData, SE1_STEP1=se1, SE2_STEP1=se2, SE3_STEP1=se3, SE4_STEP1=se4, SE5_STEP1=se5, SE6_STEP1=se6, $
-    EAE1_STEP1=eae1, EAE2_STEP2=eae2, EAE3_STEP3 = eae3
+    EAE1_STEP1=eae1, EAE2_STEP1=eae2, EAE3_STEP1 = eae3, TK20=tk20
   se1 = [16.56713573, 16.12177484, 15.31196424, 16.92365283, 14.83430981, 14.6887074, 16.35433582, 17.07934905, $
     15.14346793, 16.84663539, 15.9589066, 16.51546536, 16.30647491, 16.03995771, 15.3217373, 15.27079729, 15.66648544, $
     15.65987582, 17.02070063, 16.0450187, 15.44875444, 15.66146532, 16.28037162, 15.18539875, 15.88822271, 15.52590365, $
@@ -1838,16 +1954,57 @@ Pro GetSEData, SE1_STEP1=se1, SE2_STEP1=se2, SE3_STEP1=se3, SE4_STEP1=se4, SE5_S
     12.2854746, 13.98439406, 12.16461219, 14.27062408, 12.11003086, 13.40408537, 13.41070837, 15.51652648, 13.5497785, $
     13.74591609, 13.73327643, 13.03829969, 13.13691655, 11.49140133, 11.04820912, 10.1597526, 12.82177393, 14.10286453, $
     11.23579672]
+  tk20 = [14.61520497, 13.7633286, 15.18511079, 15.46999348, 15.41957386, 13.33969332, 14.58221155, 14.37521823, $
+    12.53726212, 15.17748995, 13.77098443, 13.49071053, 15.25853636, 13.80331905, 14.82297296, 14.85689067, 14.23970119, $
+    14.19834326, 14.66087602, 15.43571958, 14.27249142, 15.12921624, 13.72164262, 13.64291068, 15.16901885, 14.65518158, $
+    14.2890342, 14.38029975, 15.10208103, 14.35283925, 13.33066208, 14.02471058, 14.12389345, 15.22278169, 14.00639614, $
+    14.23724727, 14.88804807, 14.02361175, 13.61022383, 13.84627324, 14.57281896, 15.30497282, 14.63569942, 13.80141486, $
+    14.19015173, 13.8280187, 14.04596187, 13.97424904, 13.91337022, 14.86079285, 16.32334269, 14.73347288, 14.2939631, $
+    15.06021899, 14.5354883, 14.45853353, 15.9176885, 14.88381368, 12.45617993, 13.80297166, 15.48811238, 15.14494643, $
+    15.47286825, 14.00473777, 15.75354265, 13.36936122, 14.03280639, 14.37148264, 14.07598789, 16.17202756, 14.36517606, $
+    13.66186677, 14.38264885, 14.04689284, 14.79027911, 14.00291019, 14.32245417, 14.12944501, 14.34652319, 15.19702101, $
+    14.46709132, 13.21969648, 16.62671484, 12.97541292, 13.70036616, 14.52963174, 14.34983402]
+
 End
+
+Pro PlotMeasuredHistograms
+  defTickLen = 0.02
+  GetSEData, SE1_STEP1=se1, SE2_STEP1=se2, SE3_STEP1=se3, SE4_STEP1=se4, SE5_STEP1=se5, SE6_STEP1=se6, EAE1_STEP1=eae1, EAE2_STEP1=eae2, EAE3_STEP1=eae3, TK20=tk20
+  se1h = Histogram(se1,BINSIZE=1, MIN=0)
+  se1HistPlot = BarPlot(se1h,/HISTOGRAM, TITLE="SE1 20 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  se2h = Histogram(se2,BINSIZE=1, MIN=0)
+  se2HistPlot = BarPlot(se2h,/HISTOGRAM, TITLE="SE2 10 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  se3h = Histogram(se3,BINSIZE=1, MIN=0)
+  se3HistPlot = BarPlot(se3h,/HISTOGRAM, TITLE="SE3 10 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  se4h = Histogram(se4,BINSIZE=1, MIN=0)
+  se4HistPlot = BarPlot(se4h,/HISTOGRAM, TITLE="SE4 20 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  se5h = Histogram(se5,BINSIZE=1, MIN=0)
+  se5HistPlot = BarPlot(se5h,/HISTOGRAM, TITLE="SE5 15 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  se6h = Histogram(se6,BINSIZE=1, MIN=0)
+  se6HistPlot = BarPlot(se6h,/HISTOGRAM, TITLE="SE6 15 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  eae1h = Histogram(eae1,BINSIZE=1, MIN=0)
+  eae1HistPlot = BarPlot(eae1h,/HISTOGRAM, TITLE="EAE1 10 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  eae2h = Histogram(eae2,BINSIZE=1, MIN=0)
+  eae2HistPlot = BarPlot(eae2h,/HISTOGRAM, TITLE="EAE2 10 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  eae3h = Histogram(eae3,BINSIZE=1, MIN=0)
+  eae3HistPlot = BarPlot(eae3h,/HISTOGRAM, TITLE="EAE3 10 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  tk20h = Histogram(tk20,BINSIZE=1, MIN=0)
+  tk20HistPlot = BarPlot(tk20h,/HISTOGRAM, TITLE="TK20 20 s measurements",XTITLE="Length (µm)", YTITLE="Number", XTICKLEN=defTickLen, YTICKLEN=defTickLen)
+  
+End
+
 
 
 Pro TestVTx
 ; 0.022, 1.64, 0.0, 8.48
 ; 0.022, 1.25, 4.874, 6.028
   vB = 0.022
-  vTmax = 1.25
-  delXTo = 4.874
-  delXTo_B = 6.028
+;  vTmax = 1.059
+;  delXTo = 6.68
+;  delXTo_B = (16.99 - delXTo)/2.0
+  vTmax = 1.553
+  delXTo = 0
+  delXTo_B = (17.08 - delXTo)/2.0
   
   tsBegin = 2.
   tsEnd = 12.
